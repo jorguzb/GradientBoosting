@@ -1,0 +1,555 @@
+---
+title: "Gradient Boosting"
+output: html_document
+---
+### Loading data
+```{r}
+# libraries
+library(mlbench)
+library(rpart)
+# Data
+data(BostonHousing)
+db = BostonHousing
+print(head(db))
+```
+### Q1 Fonction de perte
+```{r}
+qloss = function(p, v) {
+    return((p-v)^2)
+}
+```
+### Q2 Dérivé de la fonction de perte
+```{r}
+qloss_d = function(p, v) {
+    return(2*(p-v))
+}
+```
+### Q3 Qloss_best_cst afin d'avoir paramètres optimaux
+```{r}
+qloss_best_cst = function(db) {
+    return(mean(db$medv))
+}
+```
+### Q4 Fonction de bagging
+```{r}
+bagging = function(h, db, K) {
+    set.seed(31416)
+    seeds = sample(1:1000000, size = K, replace = FALSE)
+    lista_mod = list()
+    for (i in 1:K){
+        # print(i)
+        set.seed(seeds[i])
+        ind_bootstrap = sample(1:nrow(db),
+                               size = floor(1 * nrow(db)),
+                               replace = TRUE)
+        db_bootstrap = db[ind_bootstrap,]
+        mod = rpart::rpart(data = db_bootstrap,
+                           formula = formula(h),
+                           method = "anova",
+                           control = list(maxdepth = 30, minsplit = 20))
+        lista_mod[[i]] = mod
+    }
+    cst = 0
+    rho = 1/K
+    f_K = lista_mod
+    lista_bagging = list(cst, rho, f_K)
+    names(lista_bagging) = c("cst", "rho", "f_K")
+    return(lista_bagging)
+}
+```
+### Q5 Test de la fonction de bagging
+```{r}
+lista_bagging = bagging(h = "medv~.", db = db, K = 50)
+print(lista_bagging$cst)
+print(lista_bagging$rho)
+print(lista_bagging$f_K[1])
+```
+### Q6 Fonction de prédiction
+```{r}
+predict_ens = function(db, lista_bagging, m = NULL, k = TRUE) {
+    lista_pred = list()
+    if (is.numeric(m) & !k) intervalo = 1:m
+    if (is.numeric(m) & k) intervalo = m+1
+    if (is.null(m)) intervalo=1:length(lista_bagging$f_K)
+    for (i in intervalo) {
+        mod = lista_bagging$f_K[[i]]
+        pred = predict(mod, db)
+        if(length(lista_bagging$rho) == 1) rho_k = lista_bagging$rho
+        else rho_k = lista_bagging$rho[[i]]
+        if (is.numeric(m) & !k) lista_pred[[i]] = lista_bagging$cst + rho_k * pred
+        if (is.numeric(m) & k) lista_pred[[i]] = pred
+        if (is.null(m)) lista_pred[[i]] = lista_bagging$cst + rho_k * pred
+    }
+    lista_pred = lista_pred[!sapply(lista_pred,is.null)]
+    if (length(lista_pred)>1) {
+        df_K_predicciones = as.data.frame(lista_pred)
+        pred_prom = apply(df_K_predicciones, 1, sum)
+    } else {
+        pred_prom = lista_pred[[1]]
+    }
+
+    return(pred_prom)
+    
+}
+
+```
+### Q7 Tester different values de K
+Contrairement à ce qu'on pourrais penser, dans cet exercice
+les meilleures valeurs sont obtenus avec k à 50 et non avec 
+une k à 500. Une hypothèse pour expliquer ce résultat pourrais être un problème de minimum locale ou un sur ajustement
+```{r}
+# K_s = c(50, 100, 200, 300, 500)
+# lista_performance = list()
+# for (i in 1:length(K_s)) {
+#     lista_bagging = bagging(h = "medv~.", db = db, K = K_s[i])
+#     lista_pred = predict_ens(db, lista_bagging)
+#     MSE = mean((unlist(lista_pred) - db$medv)^2)
+#     lista_performance[[i]] = c(sqrt(MSE),
+#                                sqrt(mean(((unlist(lista_pred) - db$medv)^2 - MSE)^2)))
+# }
+# print(lista_performance)
+
+```
+### Q8 Fonction mrisk
+```{r}
+mrisk = function(rho, g, F, y) {
+    return(sum(g + rho * F - y)^2)
+}
+```
+### Q9 Fonction optimize
+```{r}
+K_optim = 50
+lista_bagging = bagging(h = "medv~.", db = db, K = K_optim)
+lista_optimos = list()
+for(i in 3:(K_optim-1)) {
+    #print(i)
+    optimos = optimize(f = mrisk,
+                    interval = c(0, 30),
+                    g = predict_ens(db, lista_bagging, m = i, k = FALSE),
+                    F = predict_ens(db, lista_bagging, m = i, k = TRUE),
+                    y = db$medv)
+    lista_optimos[[i]] = optimos
+}
+lista_val_opt = lapply(lista_optimos, function(x) x$minimum)
+print(lista_val_opt)
+```
+### Q10 Fonction du gradient boosting
+```{r}
+gradient_boosting = function(h, db, K) {
+    g0 = predict(lm(data = db, medv~1), db)
+    y = db$medv
+    for (i in 1:K) {
+        print(i)
+        if(i == 1) g_k1 = g0
+        else g_k1 = g_k
+
+        r_ki = -qloss_d(p = g_k1,
+                        v = y)
+
+        db_r = db
+        db_r$medv = r_ki
+
+        mod = rpart::rpart(data = db_r,
+                           formula = formula(h),
+                           method = "anova",
+                           control = list(maxdepth = 1))
+
+        F_k = predict(mod, db)
+        optimos = optimize(f = mrisk,
+                           interval = c(0, 1),
+                           g = g_k1,
+                           F = F_k,
+                           y = y)
+        rho_k = optimos$minimum
+        g_k = g_k1 + rho_k * F_k
+        RMSE = sqrt(mean((g_k - y)^2))
+        print(rho_k)
+        print(RMSE)
+    }
+    return(g_k)
+}
+```
+### Q11 - 12 Comparaison Bagging et Boosting comparisson
+```{r}
+lista_bagging = bagging(h = "medv~.", db = db, K = 50)
+pred_bagging = predict_ens(db, lista_bagging)
+pred_boosting = gradient_boosting(h = "medv~.", db = db, K = 50)
+Y = db$medv
+RMSE_bagging = sqrt(mean((pred_bagging - Y)^2))
+RMSE_boosting = sqrt(mean((pred_boosting - Y)^2))
+print(c(RMSE_bagging, RMSE_boosting))
+```
+### Q13 Bagging modifié et Q14 données des defaults
+```{r}
+bagging = function(h, db, K, lista_param = list(maxdepth = 30, minsplit = 20)) {
+    require(rpart)
+    set.seed(31416)
+    seeds = sample(1:1000000, size = K, replace = FALSE)
+    lista_mod = list()
+    for (i in 1:K){
+        print(i)
+        set.seed(seeds[i])
+        ind_bootstrap = sample(1:nrow(db),
+                               size = floor(1 * nrow(db)),
+                               replace = TRUE)
+        db_bootstrap = db[ind_bootstrap,]
+        mod = rpart::rpart(data = db_bootstrap,
+                           formula = formula(h),
+                           method = "anova",
+                           control = rpart.control(maxdepth = lista_param$maxdepth,
+                                                   minsplit = lista_param$minsplit))
+        lista_mod[[i]] = mod
+    }
+    cst = 0
+    rho = 1/K
+    f_K = lista_mod
+    lista_bagging = list(cst, rho, f_K)
+    names(lista_bagging) = c("cst", "rho", "f_K")
+    return(lista_bagging)
+}
+```
+### Q15 Addition du parametre optionel pour faire des prevision OOB
+```{r}
+bagging = function(h, db, K, lista_param = list(maxdepth = 30, minsplit = 20), OOB = FALSE) {
+
+    set.seed(31416)
+    seeds = sample(1:1000000, size = K, replace = FALSE)
+    lista_mod = list()
+    lista_indices_bootstrap = list()
+    for (i in 1:K){
+        print(i)
+        set.seed(seeds[i])
+        ind_bootstrap = sample(1:nrow(db),
+                               size = floor(1 * nrow(db)),
+                               replace = TRUE)
+        db_bootstrap = db[ind_bootstrap,]
+        mod = rpart::rpart(data = db_bootstrap,
+                           formula = formula(h),
+                           method = "anova",
+                           control = rpart.control(maxdepth = lista_param$maxdepth,
+                                                   minsplit = lista_param$minsplit))
+        lista_mod[[i]] = mod
+        lista_indices_bootstrap[[i]] = as.numeric(as.character(unique(ind_bootstrap)))
+    }
+    if (OOB) {
+        y = db$medv
+        lista_SE = list()
+        for (j in 1:nrow(db)) {
+
+            lista_indices_noesta = lapply(lista_indices_bootstrap, function(x) {
+                if (any(x == j)) {
+                    FALSE
+                } else {
+                    TRUE
+                }
+            })
+            indices_noesta = which(unlist(lista_indices_noesta))
+            lista_mod_noesta = lista_mod[indices_noesta]
+            lista_pred = list()
+            for (k in 1:length(lista_mod_noesta)) {
+                pred = predict(lista_mod_noesta[[k]], db[j,])
+                lista_pred[[k]] = pred
+            }
+            pred_prom = mean(unlist(lista_pred))
+            SE = (y[j] - pred_prom)^2
+            lista_SE[[j]] = SE
+            # print(SE)
+        }
+        RMSE = sqrt(mean(unlist(lista_SE)))
+        print(paste("RMSE=",RMSE))
+    }
+    cst = 0
+    rho = 1/K
+    f_K = lista_mod
+
+    lista_bagging = list(cst, rho, f_K)#, prev_OOB)
+    names(lista_bagging) = c("cst", "rho", "f_K")#, "prev_OOB")
+    return(lista_bagging)
+}
+```
+### Q16 et Q17 Adjoute des modifications prposées par Fiedman pour améliorer le gradient boosting et prévisions OOB
+```{r}
+stochastic_gradient_boosting = function(h, db, K, v = 0.1, tamano = 1) {
+
+    # Stochastic gradient boosting
+    set.seed(314161)
+    seeds = sample(1:1000000, size = K, replace = FALSE)
+    g0 = predict(lm(data = db, medv~1), db)
+    y = db$medv
+    lista_oob_error = list()
+    for (i in 1:K) {
+        print(i)
+        set.seed(seeds[i])
+        ind_subsample = sample(1:nrow(db),
+                        size = floor(tamano * nrow(db)),
+                        replace = FALSE)
+        if(i == 1) g_k1 = g0
+        else g_k1 = g_k
+
+        r_ki = -qloss_d(p = g_k1,
+                        v = y)
+
+        db_r = db
+        db_r$medv = r_ki
+
+        db_train = db_r[ind_subsample,]
+        mod = rpart::rpart(data = db_train,
+                           formula = formula(h),
+                           method = "anova",
+                           control = list(maxdepth = 1))
+        # Prévision OOB
+        if(tamano<1) {
+            db_test = db_r[-ind_subsample,]
+            pseudoRes = predict(mod, db_test)
+            prevision = mean(db_test$medv) + pseudoRes
+            RMSE = sqrt(mean(pseudoRes^2))
+            lista_oob_error[[i]] = RMSE
+        }
+        F_k = predict(mod, db)
+        optimos = optimize(f = mrisk,
+                           interval = c(0, 1),
+                           g = g_k1,
+                           F = F_k,
+                           y = y)
+        rho_k = optimos$minimum
+        g_k = g_k1 + v * rho_k * F_k# ajustement de la v de Friedman pour shrinkage
+        RMSE = sqrt(mean((g_k - y)^2))
+        print(paste("RMSE error:", RMSE))
+    }
+    return(g_k)
+}
+# test
+lista_bagging = bagging(h = "medv~.", db = db, K = 50, OOB = FALSE)
+pred_bagging = predict_ens(db, lista_bagging)
+pred_boosting = stochastic_gradient_boosting(h = "medv~.", 
+                                             db = db, 
+                                             K = 100,# 25000 
+                                             tamano = 1)
+Y = db$medv
+RMSE_bagging = sqrt(mean((pred_bagging - Y)^2))
+RMSE_boosting = sqrt(mean((pred_boosting - Y)^2))
+print(c(RMSE_bagging, RMSE_boosting))
+#Avec un valeur de 25000 pour K le RMSE du bossting est inférieur à celui du bagging 3,161 Vs 3,343
+```
+### Q18 et Q19 Optimistion avec l'equation d'Euler
+```{r}
+
+deriv_rho_l2 = function(rho, g, F, y) {
+    return(sum(2 * (g + rho * F - y) * F))
+}
+
+qloss_solve = function(gradiente, g, F, y, precision = 0.0001, size = 0.00001) {
+    valor_inicial = 0
+    numero = 0
+    while(TRUE) {
+        numero = numero + 1
+        # print(numero)
+        step = -gradiente(valor_inicial, g, F, y)
+        valor_inicial = valor_inicial + size * step
+        actualizacion = gradiente(valor_inicial, g, F, y)
+        error = abs(actualizacion)
+        if (error <= precision){
+            rho_optima = valor_inicial
+            break
+        }
+
+    }
+    return(rho_optima)
+}
+```
+### Q20 Modification du gradient boosting afin d'utiliser qloss_solve
+```{r}
+stochastic_gradient_boosting = function(h, db, K, v = 0.1, tamano = 1, gradiente, use_optimize = TRUE) {
+
+    # Stochastic gradient boosting
+    set.seed(314161)
+    seeds = sample(1:1000000, size = K, replace = FALSE)
+    g0 = predict(lm(data = db, medv~1), db)
+    y = db$medv
+    lista_oob_error = list()
+    for (i in 1:K) {
+        print(i)
+        set.seed(seeds[i])
+        ind_subsample = sample(1:nrow(db),
+                        size = floor(tamano * nrow(db)),
+                        replace = FALSE)
+        if(i == 1) g_k1 = g0
+        else g_k1 = g_k
+
+        r_ki = -qloss_d(p = g_k1,
+                        v = y)
+
+        db_r = db
+        db_r$medv = r_ki
+
+        db_train = db_r[ind_subsample,]
+        mod = rpart::rpart(data = db_train,
+                           formula = formula(h),
+                           method = "anova",
+                           control = list(maxdepth = 1))
+        # Prevision OOB
+        if(tamano<1) {
+            db_test = db_r[-ind_subsample,]
+            pseudoRes = predict(mod, db_test)
+            prevision = mean(db_test$medv) + pseudoRes
+            RMSE = sqrt(mean(pseudoRes^2))
+            lista_oob_error[[i]] = RMSE
+        }
+        F_k = predict(mod, db)
+
+        if (use_optimize) {
+            optimos = optimize(f = mrisk,
+                           interval = c(0, 1),
+                           g = g_k1,
+                           F = F_k,
+                           y = y)
+            rho_k = optimos$minimum
+        } else {
+            rho_k = qloss_solve(gradiente,
+                                g = g_k1,
+                                F = F_k,
+                                y = y)
+        }
+        g_k = g_k1 + v * rho_k * F_k
+        RMSE = sqrt(mean((g_k - y)^2))
+        print(paste("RMSE error:", RMSE))
+    }
+    return(g_k)
+}
+
+# Test
+ gradiente = deriv_rho_l2
+ pred_boosting_stochastic=stochastic_gradient_boosting(h = "medv~.", 
+                              db = db, 
+                              tamano = 0.5, 
+                              K = 100,#25000 
+                              gradiente = gradiente, 
+                              use_optimize = FALSE)
+
+Y = db$medv
+RMSE_boosting_stochastic = sqrt(mean((pred_boosting_stochastic - Y)^2))
+print(RMSE_boosting_stochastic)
+
+```
+### Q21 Function quadratic loss
+```{r}
+quadratic_loss = function(loss = qloss,
+                          deriva = qloss_d,
+                          cst = qloss_best_cst,
+                          solve = qloss_solve) {
+    lista = list(loss, deriva, cst, solve)
+    names(lista) = c("loss", "deriva", "cst", "solve_grad_desc")
+    return(lista)
+}
+```
+### Q22 Modification du gradient boosting
+Ici on va additioner un parametre pour determiner la fonction de perte, ça derivé (s'il existe), la fonction
+qui trouve le meilleur modele constant et la fonction solve pour realiser le descent de gradient.
+```{r}
+stochastic_gradient_boosting = function(h, db, K, v = 0.1, tamano = 1, gradiente, use_optimize = TRUE,
+                                        loss_list = quadratic_loss()) {
+
+    # Stochastic gradient boosting
+    set.seed(314161)
+    seeds = sample(1:1000000, size = K, replace = FALSE)
+    # g0 = predict(lm(data = db, medv~1), db)
+    g0 = loss_list$cst(db)
+    y = db$medv
+    lista_oob_error = list()
+    for (i in 1:K) {
+        print(i)
+        set.seed(seeds[i])
+        ind_subsample = sample(1:nrow(db),
+                        size = floor(tamano * nrow(db)),
+                        replace = FALSE)
+        if(i == 1) g_k1 = g0
+        else g_k1 = g_k
+
+        r_ki = -loss_list$deriva(p = g_k1, v = y)
+        db_r = db
+        db_r$medv = r_ki
+
+        db_train = db_r[ind_subsample,]
+        mod = rpart::rpart(data = db_train,
+                           formula = formula(h),
+                           method = "anova",
+                           control = list(maxdepth = 1))
+        # Prevision OOB
+        if(tamano<1) {
+            db_test = db_r[-ind_subsample,]
+            pseudoRes = predict(mod, db_test)
+            prevision = mean(db_test$medv) + pseudoRes
+            RMSE = sqrt(mean(pseudoRes^2))
+            lista_oob_error[[i]] = RMSE
+        }
+        F_k = predict(mod, db)
+
+        if (use_optimize) {
+            optimos = optimize(f = mrisk,
+                           interval = c(0, 1),
+                           g = g_k1,
+                           F = F_k,
+                           y = y)
+            rho_k = optimos$minimum
+        } else {
+
+            rho_k = loss_list$solve_grad_desc(gradiente,
+                                g = g_k1,
+                                F = F_k,
+                                y = y)
+        }
+        g_k = g_k1 + v * rho_k * F_k
+
+        RMSE = sqrt(mean(loss_list$loss(p = g_k, v = y)))
+        print(paste("RMSE error:", RMSE))
+    }
+    return(g_k)
+}
+
+# Test
+gradiente = deriv_rho_l2
+stochastic_gradient_boosting(h = "medv~.",
+                             db = db,
+                             tamano = 0.5,
+                             K = 100,
+                             gradiente = gradiente,
+                             use_optimize = FALSE,
+                             loss_list = quadratic_loss())# Modification de la fonction
+
+```
+### Q23 Absolute loss
+Ici on contruit la perte absolute. Elle n'est pas de derivablée, donc pour l'optimiser il  faut utiliser autres techniques.
+```{r}
+absolute_loss = function (p, v) {
+    return(abs(p - v))
+}
+```
+### Q24 Perte de huber.
+
+La perte de huber a le même problem dans le valeur delta, elle n'est pas de derivablée. 
+```{r}
+huber_loss = function (p, v, delta) {
+    perte = abs(p - v)
+    loss = ifelse (perte >= delta,
+                   1/2*(perte^2),
+                   delta*(perte - delta/2))
+    return(loss)
+} 
+```
+### Q25A logistic_loss.
+Cette perte est utiliseé par des problemes de classification, donc dans cette cas on ne peux pas l'utilisser
+parce que la variable dependante "medv" est numerique.
+```{r}
+logistic_loss = function(v){
+    loss = 1/log(2)*log(1 + exp(-v))
+    return(loss)
+}
+```
+### Q25B exponential_loss
+Même cas que celui de la perte logistique
+```{r}
+exponential_loss = function(v) {
+    loss = exp(-v)
+    return(loss)
+}
+```
